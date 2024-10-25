@@ -1,4 +1,4 @@
 Flask==2.0.2
-Werkzeug==2.0.3
+Werkzeug==3.0.3
 requests==2.32.0
 flask-talisman==0.8.1
