@@ -17,8 +17,22 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 复制应用代码到容器中
 COPY . .
 
-# 暴露应用运行的端口
-EXPOSE 5000
+# 设置默认端口为 5000
+ENV PORT=5000
 
-# 启动 Flask 应用
-CMD ["python", "app.py"]
+# 暴露应用运行的端口
+EXPOSE $PORT
+
+
+# 使用 Gunicorn 启动 Flask 应用
+# --w 4: 使用 4 个工作进程，适合 2 核心的服务器
+# --b 0.0.0.0:5000: 绑定到所有 IP 地址的 5000 端口
+# --log-level info：设置日志级别为 info
+# --access-logfile - 和 --error-logfile -：将访问日志和错误日志都输出到标准输出
+# -app:app: 第一个 'app' 是 Python 文件名（不带 .py），第二个 'app' 是 Flask 应用实例名称
+CMD gunicorn --workers 4 \
+             --bind 0.0.0.0:$PORT \
+             --log-level info \
+             --access-logfile - \
+             --error-logfile - \
+             app:app
