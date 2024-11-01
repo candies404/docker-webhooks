@@ -8,6 +8,22 @@ from services.deploy_service import handle_webhook
 from services.render_service import RenderService
 from services.project_service import ProjectService
 
+
+# 配置日志
+def configure_logging():
+    # 使用更具体的logger名称，而不是root
+    logger = logging.getLogger('docker-hooks')
+    handler = logging.StreamHandler(sys.stdout)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    return logger
+
+
+# 在应用初始化时调用
+logger = configure_logging()
+
 app = Flask(__name__)
 
 # 设置 JSON 编码为 UTF-8
@@ -16,22 +32,15 @@ app.config['JSON_AS_ASCII'] = False
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 
 # 加载配置
-config = load_config()
-app.config.update(config)
+try:
+    config = load_config()
+    app.config.update(config)
+except ValueError as e:
+    logger.error(f"配置加载失败: {str(e)}")
+    sys.exit(1)
 
 # 添加部署状态跟踪
 last_deploy_time = {}
-
-
-# 配置日志
-def configure_logging():
-    logger = logging.getLogger()
-    handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    return logger
 
 
 # JSON响应处理函数
@@ -43,15 +52,12 @@ def json_response(data, status_code=200):
     )
 
 
-# 在应用初始化时调用
-logger = configure_logging()
-
 if __name__ != '__main__':
     gunicorn_logger = logging.getLogger('gunicorn.error')
     logger.handlers = gunicorn_logger.handlers
     logger.setLevel(gunicorn_logger.level)
 
-app.logger = logger
+# app.logger = logger
 
 # 初始化服务
 render_service = RenderService(app.config['BASE_URL'])
@@ -94,9 +100,13 @@ def webhook():
         current_app.logger.error("无效的 Content-Type，需要 application/json")
         return json_response({'error': '无效的 Content-Type，需要 application/json'}, 400)
 
+    # 确保请求中包含 token
     token = request.args.get('token')
+    if not token:
+        return json_response({'error': '缺少认证令牌'}, 401)
+
+    # 使用安全的比较方法
     if token != app.config['SECRET_TOKEN']:
-        current_app.logger.warning("无效的令牌")
         return json_response({'error': '无效的令牌'}, 403)
 
     project = request.args.get('project')
