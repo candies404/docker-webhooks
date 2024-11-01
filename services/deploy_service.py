@@ -47,8 +47,8 @@ def handle_webhook(render_service, project, api_key):
     logger.info(f"处理 webhook: 项目 {project}")
     services = render_service.get_services(api_key)
     if not services:
-        logger.error(f"无法获取服务列表或列表为空: 项目 {project}")
-        return None, '无法获取服务列表或列表为空', 500
+        logger.error(f"列表为空，检查是否在render部署了项目: 项目 {project}")
+        return None, '列表为空，检查是否在render部署了项目', 500
 
     # 部署第一个服务
     service = services[0]
