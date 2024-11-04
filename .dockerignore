@@ -1,0 +1,27 @@
+# 版本控制
+.git/
+.github/
+
+# IDE
+.idea/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+
+# 文档
+README.md
+CHANGELOG.md
+
+# Docker
+.dockerignore
+Dockerfile*
+
+# 其他
+*.log
+*.bak
+*.tmp
+.DS_Store

@@ -1,17 +1,34 @@
-from typing import Tuple, Optional, Dict, Any
-
-import requests
 import logging
 import threading
 import time
 from datetime import datetime, timezone
-from notify import send
+from multiprocessing import Process, log_to_stderr  # 添加 log_to_stderr 导入
+from typing import Tuple, Optional, Dict, Any
+
+import requests
+
 from config.constants import (
     MAX_DEPLOY_RETRIES,
-    DEPLOY_CHECK_INTERVAL, PREFER_CUSTOM_DOMAIN
+    DEPLOY_CHECK_INTERVAL,
+    PREFER_CUSTOM_DOMAIN
 )
+from utils.notify import send
 
 logger = logging.getLogger(__name__)
+
+
+# 服务状态常量
+class ServiceStatus:
+    SUSPENDED = 'suspended'
+    NOT_SUSPENDED = 'not_suspended'
+
+
+# 部署状态常量
+class DeployStatus:
+    LIVE = 'live'
+    FAILED = 'failed'
+    CANCELLED = 'cancelled'
+    DEACTIVATED = 'deactivated'
 
 
 class RenderService:
@@ -25,14 +42,19 @@ class RenderService:
             base_url: Render API 的基础 URL
         """
         self.base_url = base_url
-        self.logger = logger
+        # 直接使用 docker-hooks logger 而不是创建新的
+        self.logger = logging.getLogger('docker-hooks')
 
-    def get_services(self, api_key):
+    def get_services(self, api_key: str, suspended: Optional[str] = None):
         """
         获取 Render 服务列表
 
         Args:
             api_key: Render API 密钥
+            suspended: 可选，筛选服务状态
+                - "suspended": 只返回已暂停的服务
+                - "not_suspended": 只返回未暂停的服务
+                - None: 返回所有服务
 
         Returns:
             list: 成功时返回服务列表
@@ -43,11 +65,22 @@ class RenderService:
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/json"
         }
-        response = requests.get(f"{self.base_url}/services", headers=headers)
+
+        # 构建查询参数
+        params = {}
+        if suspended is not None:
+            params['suspended'] = suspended
+
+        response = requests.get(
+            f"{self.base_url}/services",
+            headers=headers,
+            params=params
+        )
+
         if response.status_code == 200:
             services = response.json()
-            logger.info(f"获取到 {len(services)} 个服务")
-            self._log_service_names(services)  # 改为私有方法调用
+            self.logger.info(f"获取到 {len(services)} 个服务")
+            self._log_service_names(services)
             return services
         else:
             logger.error(f"获取服务列表失败: {response.status_code}")
@@ -83,11 +116,11 @@ class RenderService:
                     f"https://{item['customDomain']['name']}"
                     for item in domains_data
                     if isinstance(item, dict)
-                    and 'customDomain' in item
-                    and item['customDomain'].get('verificationStatus') == 'verified'
-                    and item['customDomain'].get('name')
+                       and 'customDomain' in item
+                       and item['customDomain'].get('verificationStatus') == 'verified'
+                       and item['customDomain'].get('name')
                 ]
-                logger.info(f"获取到 {len(domains)} 个已验证的自定义域名")
+                self.logger.info(f"获取到 {len(domains)} 个已验证的自定义域名")
                 return domains
             else:
                 logger.error(f"获取自定义域名失败: {response.status_code}")
@@ -135,8 +168,7 @@ class RenderService:
             'custom_domains': self.get_custom_domains(service_id, api_key)
         }
 
-    @staticmethod
-    def _log_service_names(services):
+    def _log_service_names(self, services):
         """
         记录服务名称和 ID（私有方法）
 
@@ -146,7 +178,7 @@ class RenderService:
         for service in services:
             name = service.get('service', {}).get('name')
             service_id = service.get('service', {}).get('id')
-            logger.info(f"服务名称: {name}, ID: {service_id}")
+            self.logger.info(f"服务名称: {name}, ID: {service_id}")
 
     def trigger_deploy(self, service_id, api_key):
         """
@@ -179,7 +211,7 @@ class RenderService:
             api_key: str,
             max_retries: int = MAX_DEPLOY_RETRIES,
             interval: int = DEPLOY_CHECK_INTERVAL
-    ) -> Tuple[bool, str]:
+    ) -> Tuple[bool, str, str]:
         """
         检查部署状态，直到部署成功或失败，或达到最大重试次数
 
@@ -191,47 +223,81 @@ class RenderService:
             interval: 重试间隔（秒），默认从配置获取
 
         Returns:
-            Tuple[bool, str]:
+            Tuple[bool, str, str]:
                 - bool: 部署是否成功
                 - str: 部署完成时间（UTC格式），失败时为空字符串
-
-        Note:
-            - 部署状态包括：'live'（成功）, 'failed'（失败）, 'canceled'（取消）
-            - 完成时间格式为 ISO 8601: "YYYY-MM-DDThh:mm:ss.sssZ"
+                - str: 部署状态
         """
         url = f"{self.base_url}/services/{service_id}/deploys/{deploy_id}"
         headers = {"Authorization": f"Bearer {api_key}"}
 
         retries = 0
+        last_status = None
+
+        self.logger.info(f"开始检查部署状态: deploy_id={deploy_id}")
+        self.logger.info(f"最大重试次数: {max_retries}, 检查间隔: {interval}秒")
+
         while retries < max_retries:
-            response = requests.get(url, headers=headers)
-            if response.status_code != 200:
-                logger.error(f"无法获取部署状态: {response.status_code}")
-                return False, ""
+            try:
+                self.logger.info(f"第 {retries + 1}/{max_retries} 次检查部署状态")
+                response = requests.get(url, headers=headers)
 
-            deploy_info = response.json()
-            status = deploy_info.get("status")
-            finish_time = deploy_info.get("finishedAt", "")
+                if response.status_code != 200:
+                    logger.error(f"获取部署状态失败: HTTP {response.status_code}")
+                    logger.error(f"响应内容: {response.text}")
+                    return False, "", "failed"
 
-            if status == "live":
-                return True, finish_time
-            elif status in ["failed", "canceled"]:
-                return False, finish_time
+                deploy_info = response.json()
+                current_status = deploy_info.get("status", "unknown")
 
-            time.sleep(interval)
-            retries += 1
+                # 记录详细的部署信息
+                self.logger.info(f"部署信息: {deploy_info}")
 
-        logger.error("检查部署状态超时")
-        return False, ""
+                # 记录当前状态，即使没有变化
+                self.logger.info(f"当前部署状态: {current_status}")
 
-    @staticmethod
+                # 记录状态变化
+                if current_status != last_status:
+                    self.logger.info(f"部署状态从 {last_status} 变更为 {current_status}")
+                    last_status = current_status
+
+                finish_time = deploy_info.get("finishedAt", "")
+
+                if current_status == DeployStatus.LIVE:
+                    self.logger.info(f"部署成功完成！总耗时: {retries * interval} 秒")
+                    self.logger.info(f"完成时间: {finish_time}")
+                    return True, finish_time, current_status
+
+                elif current_status in [DeployStatus.FAILED, DeployStatus.CANCELLED, DeployStatus.DEACTIVATED]:
+                    logger.error(f"部署失败！状态: {current_status}")
+                    logger.error(f"总耗时: {retries * interval} 秒")
+                    logger.error(f"完成时间: {finish_time}")
+                    # 记录更多失败细节
+                    if 'errorMessage' in deploy_info:
+                        logger.error(f"错误信息: {deploy_info['errorMessage']}")
+                    return False, finish_time, current_status
+
+                retries += 1
+                if retries < max_retries:
+                    self.logger.info(f"等待 {interval} 秒后进行下一次检查...")
+                    time.sleep(interval)
+
+            except Exception as e:
+                logger.error(f"检查部署状态时发生错误: {str(e)}")
+                return False, "", "failed"
+
+        logger.error(f"检查部署状态超时，已达到最大重试次数 {max_retries}")
+        logger.error(f"最后的部署状态: {last_status}")
+        return False, "", last_status or "failed"
+
     def send_deploy_notification(
+            self,  # 添加 self 参数
             project: str,
             service_name: str,
-            success: bool,
             deploy_id: Optional[str] = None,
             urls: Optional[Dict[str, Any]] = None,
-            finish_time: Optional[str] = None
+            finish_time: Optional[str] = None,
+            status: str = None
     ) -> None:
         """
         发送部署通知
@@ -239,10 +305,10 @@ class RenderService:
         Args:
             project: 项目名称
             service_name: 服务名称
-            success: 部署是否成功
             deploy_id: 部署ID（可选）
-            urls: URL信息 ，格式同 get_service_urls 的返回值
-            finish_time: 部署完成时间 ，格式为 ISO 8601
+            urls: URL信息，格式同 get_service_urls 的返回值
+            finish_time: 部署完成时间，格式为 ISO 8601
+            status: 部署状态（live、failed、cancelled）
 
         Note:
             - URL 显示格式由 PREFER_CUSTOM_DOMAIN 环境变量控制
@@ -250,38 +316,17 @@ class RenderService:
               - false: 同时显示默认域名和自定义域名
             - 时间显示包括部署完成时间（UTC转本地）和通知发送时间（本地）
             - 多个自定义域名使用 | 符号分隔显示
-
-        Example:
-            当 PREFER_CUSTOM_DOMAIN=true 时：
-            ### Render 部署通知
-            **项目名**: one-hub
-            **服务名**: server
-            **部署状态**: 成功
-            **部署ID**: dep-xxx
-            **自定义域名**: https://api.example.com | https://test.example.com
-            **部署完成时间**: 2024-11-04 02:35:40
-            **通知时间**: 2024-11-04 02:35:45
-
-            当 PREFER_CUSTOM_DOMAIN=false 时：
-            ### Render 部署通知
-            **项目名**: one-hub
-            **服务名**: server
-            **部署状态**: 成功
-            **部署ID**: dep-xxx
-            **默认域名**: https://server-usq3.onrender.com
-            **自定义域名**: https://api.example.com | https://test.example.com
-            **部署完成时间**: 2024-11-04 02:35:40
-            **通知时间**: 2024-11-04 02:35:45
         """
         # 构建基本通知内容
-        status = "成功" if success else "失败"
         title = "Render 部署通知"
+        # 根据状态添加图标
+        status_icon = "✅" if status == "live" else "❌"
 
         content = (
-            f"### {title}\n\n"
+            f"--- \n\n"
             f"**项目名**: {project}\n\n"
             f"**服务名**: {service_name}\n\n"
-            f"**部署状态**: {status}\n\n"
+            f"**部署状态**: {status_icon} {status}\n\n"
         )
 
         # 添加部署ID（如果有）
@@ -311,7 +356,7 @@ class RenderService:
                 local_time = utc_time.replace(tzinfo=timezone.utc).astimezone()
                 content += f"**部署完成时间**: {local_time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             except ValueError:
-                logger.warning(f"无法解析部署完成时间: {finish_time}")
+                self.logger.warning(f"无法解析部署完成时间: {finish_time}")
 
         # 添加通知发送时间
         content += f"**通知时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -348,53 +393,62 @@ class RenderService:
             - 域名显示格式由 PREFER_CUSTOM_DOMAIN 环境变量控制
             - 如果部署失败，通知中将不包含域名信息
             - 时间信息包括部署完成时间和通知发送时间
+            - 部署状态
         """
         thread_name = threading.current_thread().name
-        logger.info(f"[{thread_name}] 开始检查部署状态: 项目名 {project}, 服务名称 {service_name}")
+        self.logger.info(f"[{thread_name}] 开始检查部署状态: 项目名 {project}, 服务名称 {service_name}")
 
-        deploy_success, finish_time = self.check_deploy_status(service_id, deploy_id, api_key)
+        deploy_success, finish_time, status = self.check_deploy_status(service_id, deploy_id, api_key)
 
         # 获取服务 URL 信息
         urls = None
         if deploy_success:
             urls = self.get_service_urls(service_id, api_key)
-            logger.info(f"[{thread_name}] 部署成功: 项目名 {project}, 服务名称 {service_name}")
+            self.logger.info(f"[{thread_name}] 部署成功: 项目名 {project}, 服务名称 {service_name}")
         else:
-            logger.error(f"[{thread_name}] 部署失败: 项目名 {project}, 服务名称 {service_name}")
+            self.logger.error(f"[{thread_name}] 部署{status}: 项目名 {project}, 服务名称 {service_name}")
 
         # 发送带有 URL 和完成时间的通知
-        RenderService.send_deploy_notification(
+        self.send_deploy_notification(
             project=project,
             service_name=service_name,
-            success=deploy_success,
             deploy_id=deploy_id,
             urls=urls,
-            finish_time=finish_time
+            finish_time=finish_time,
+            status=status
         )
 
-        logger.info(f"[{thread_name}] 部署状态检查和通知发送完成: 项目名 {project}, 服务名称 {service_name}")
+        self.logger.info(f"[{thread_name}] 部署状态检查和通知发送完成: 项目名 {project}, 服务名称 {service_name}")
 
     def handle_webhook(self, project, api_key):
         """
         处理 webhook 请求，触发部署并启动状态监控
-
-        Args:
-            project: 项目名称
-            api_key: Render API 密钥
-
-        Returns:
-            tuple: (响应数据, 错误信息, HTTP状态码)
-                - 成功时: (dict, None, 200)
-                - 失败时: (None, str, error_code)
         """
-        logger.info(f"处理 webhook: 项目名 {project}")
-        services = self.get_services(api_key)
+        self.logger.info(f"处理 webhook: 项目名 {project}")
+
+        # 获取未暂停的服务
+        services = self.get_services(api_key, suspended=ServiceStatus.NOT_SUSPENDED)
         if not services:
-            logger.warning(f"未找到已部署的服务: 项目名: {project}")
-            return {
-                'status': 'warning',
-                'message': '未找到已部署的服务，请先在 Render 上部署项目名'
-            }, None, 200
+            # 如果没有找到未暂停的服务，检查是否有已暂停的服务
+            suspended_services = self.get_services(api_key, suspended=ServiceStatus.SUSPENDED)
+            if suspended_services:
+                service = suspended_services[0]
+                service_data = service.get('service', {})
+                service_name = service_data.get('name', 'unknown')
+                suspenders = service_data.get('suspenders', [])
+
+                # 根据暂停者类型返回相应的错误信息
+                suspend_reason = "服务已被 Render 管理员暂停" if "admin" in suspenders else "服务已被用户手动暂停"
+
+                return None, {
+                    "error": f"触发部署失败: 项目名 {project}, 服务名称 {service_name}",
+                    "details": suspend_reason
+                }, 500
+            else:
+                return None, {
+                    "error": f"触发部署失败: 项目名 {project}",
+                    "details": "未找到相关服务，请检查 API 密钥是否正确"
+                }, 500
 
         # 部署第一个服务
         service = services[0]
@@ -403,24 +457,29 @@ class RenderService:
 
         if not service_id:
             logger.error(f"无法获取服务ID: 项目名 {project}, 服务名称 {service_name}")
-            return None, '无法获取服务ID', 500
+            return None, {
+                "error": f"触发部署失败: 项目名 {project}, 服务名称 {service_name}",
+                "details": "无法获取服务ID"
+            }, 500
 
-        logger.info(f"准备部署服务: 项目名 {project}, 服务名称 {service_name}")
+        self.logger.info(f"准备部署服务: 项目名 {project}, 服务名称 {service_name}")
 
         deploy_result = self.trigger_deploy(service_id, api_key)
         if deploy_result:
             deploy_id = deploy_result.get('id')
-            logger.info(f"新的部署已触发: 项目名 {project}, 服务名称 {service_name}")
+            self.logger.info(f"新的部署已触发: 项目名 {project}, 服务名称 {service_name}")
 
-            # 在后台线程中检查部署状态并发送通知
-            thread_name = f"Thread-{project}"
-            thread = threading.Thread(
+            # 启用多进程日志
+            log_to_stderr()
+
+            # 使用进程
+            process = Process(
                 target=self.check_deploy_and_notify,
-                name=thread_name,
+                name=f"Process-{project}",
                 args=(project, service_name, service_id, deploy_id, api_key)
             )
-            thread.start()
-            logger.info(f"后台检查部署状态的线程已启动: 项目名: {project}, 服务名称 {service_name}")
+            process.start()
+            self.logger.info(f"后台检查部署状态的进程已启动: 项目名: {project}, 服务名称 {service_name}")
 
             return {
                 'message': '部署已触发',
@@ -430,6 +489,7 @@ class RenderService:
                 'status': 'pending'
             }, None, 200
         else:
-            logger.error(f"触发部署失败: 项目名 {project}, 服务名称 {service_name}")
-            RenderService.send_deploy_notification(project, service_name, False)
-            return None, '触发部署失败', 500
+            return None, {
+                "error": f"触发部署失败: 项目名 {project}, 服务名称 {service_name}",
+                "details": "API 调用失败，请检查服务状态"
+            }, 500
