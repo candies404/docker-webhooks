@@ -161,7 +161,7 @@ def bark(title: str, content: str) -> None:
     ):
         data[bark_params.get(pair[0])] = pair[1]
     headers = {"Content-Type": "application/json;charset=utf-8"}
-    response = requests.pt(
+    response = requests.post(
         url=url, data=json.dumps(data), headers=headers, timeout=15
     ).json()
 
