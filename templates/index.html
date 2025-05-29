@@ -60,7 +60,9 @@
         <p>我们建议您不要继续使用，以免影响正常运行。</p>
         <p>如有任何疑问，请与管理员联系。</p>
         <p>再次感谢您的理解与配合！</p>
-        <p class="contact">联系邮箱：<a href="mailto:sugar404@qq.com">sugar404@qq.com</a></p>
+        {% if contact_email %}
+        <p class="contact">联系邮箱：<a href="mailto:{{ contact_email }}">{{ contact_email }}</a></p>
+        {% endif %}
     </div>
 </body>
 </html>

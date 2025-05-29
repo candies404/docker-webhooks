@@ -50,7 +50,8 @@
 | MAX_DEPLOY_RETRIES    | 部署状态查询重试次数      | 否    | 5（默认值）          |
 | DEPLOY_CHECK_INTERVAL | 部署状态检查间隔(秒)     | 否    | 60（默认值）         |
 | PREFER_CUSTOM_DOMAIN  | 域名显示配置默认显示自定义域名 | 否    | false           |
-| MAX_WORKERS           | workers 数量      | 否    | 4               |      
+| MAX_WORKERS           | workers 数量      | 否    | 4               |
+| CONTACT_EMAIL         | 主页展示的联系邮箱 | 否    | admin@example.com |
 
 ### 项目配置
 
@@ -106,6 +107,7 @@ PROJECT__APP__API_KEY=rnd_yyy
       -e DD_BOT_SECRET=your_DD_BOT_SECRET \
       -e DD_BOT_TOKEN=your_DD_BOT_TOKEN \
       -e TZ=Asia/Shanghai \
+      -e CONTACT_EMAIL=admin@example.com \
       docker-webhooks
     ```
 
@@ -133,6 +135,7 @@ PROJECT__APP__API_KEY=rnd_yyy
        # 基础配置
        export SECRET_TOKEN=your_secret_token
        export TZ=Asia/Shanghai
+       export CONTACT_EMAIL=admin@example.com
        
        # 项目配置（至少配置一个项目）
        export PROJECT__BLOG__SERVICE_NAME="我的博客"
@@ -151,6 +154,7 @@ PROJECT__APP__API_KEY=rnd_yyy
        # 基础配置
        set SECRET_TOKEN=your_secret_token
        set TZ=Asia/Shanghai
+       set CONTACT_EMAIL=admin@example.com
        
        # 项目配置（至少配置一个项目）
        set PROJECT__BLOG__SERVICE_NAME=我的博客
