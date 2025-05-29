@@ -2,6 +2,7 @@ from datetime import datetime
 from flask import render_template, current_app
 from utils.response import json_response
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -9,7 +10,8 @@ logger = logging.getLogger(__name__)
 def home():
     """首页路由"""
     logger.info("访问了首页")
-    return render_template('index.html')
+    contact_email = os.getenv('CONTACT_EMAIL', '')
+    return render_template('index.html', contact_email=contact_email)
 
 
 def test():

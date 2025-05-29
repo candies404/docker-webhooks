@@ -981,12 +981,8 @@ def send(title: str, content: str, ignore_default_config: bool = False, **kwargs
     content += "\n\n" + one() if hitokoto != "false" else ""
 
     notify_function = add_notify_function()
-    ts = [
-        threading.Thread(target=mode, args=(title, content), name=mode.__name__)
-        for mode in notify_function
-    ]
-    [t.start() for t in ts]
-    [t.join() for t in ts]
+    for mode in notify_function:
+        mode(title, content)
 
 
 def main():

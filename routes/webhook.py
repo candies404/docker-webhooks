@@ -64,6 +64,7 @@ def webhook():
     # 获取文件锁
     lock_file = get_deploy_lock(project)
     lock_acquired = False
+    lock_handled = False
     try:
         # 尝试获取文件锁
         if not file_lock(lock_file):
@@ -110,7 +111,7 @@ def webhook():
             }, 500)
 
         render_service = get_render_service()
-        response, error, status_code = render_service.handle_webhook(project, api_key)
+        response, error, status_code, lock_handled = render_service.handle_webhook(project, api_key, lock_file)
         if error:
             logger.error(f"处理 webhook 时出错: {error}")
             return json_response({'error': error, 'project': project}, status_code)
@@ -126,7 +127,7 @@ def webhook():
             'status': 'error'
         }, 500)
     finally:
-        if lock_acquired:
+        if lock_acquired and not lock_handled:
             file_unlock(lock_file)
             logger.info(f"释放锁，时间：{datetime.now().isoformat()}")
-        lock_file.close()
+            lock_file.close()

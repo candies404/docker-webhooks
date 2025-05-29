@@ -13,6 +13,7 @@ from config.constants import (
     PREFER_CUSTOM_DOMAIN
 )
 from utils.notify import send
+from utils.lock_utils import file_unlock
 
 logger = logging.getLogger(__name__)
 
@@ -420,9 +421,18 @@ class RenderService:
 
         self.logger.info(f"[{thread_name}] 部署状态检查和通知发送完成: 项目名 {project}, 服务名称 {service_name}")
 
-    def handle_webhook(self, project, api_key):
+    def _release_lock_after_process(self, process: Process, lock_file) -> None:
+        """等待子进程结束并释放文件锁"""
+        process.join()
+        file_unlock(lock_file)
+        lock_file.close()
+        self.logger.info(f"释放锁，时间：{datetime.now().isoformat()}")
+
+    def handle_webhook(self, project, api_key, lock_file):
         """
         处理 webhook 请求，触发部署并启动状态监控
+        lock_file: 部署锁文件，用于确保同一项目不会并发部署
+        返回值最后一个布尔值表示是否由此函数负责释放锁
         """
         self.logger.info(f"处理 webhook: 项目名 {project}")
 
@@ -443,12 +453,12 @@ class RenderService:
                 return None, {
                     "error": f"触发部署失败: 项目名 {project}, 服务名称 {service_name}",
                     "details": suspend_reason
-                }, 500
+                }, 500, False
             else:
                 return None, {
                     "error": f"触发部署失败: 项目名 {project}",
                     "details": "未找到相关服务，请检查 API 密钥是否正确"
-                }, 500
+                }, 500, False
 
         # 部署第一个服务
         service = services[0]
@@ -460,26 +470,35 @@ class RenderService:
             return None, {
                 "error": f"触发部署失败: 项目名 {project}, 服务名称 {service_name}",
                 "details": "无法获取服务ID"
-            }, 500
+            }, 500, False
 
         self.logger.info(f"准备部署服务: 项目名 {project}, 服务名称 {service_name}")
 
         deploy_result = self.trigger_deploy(service_id, api_key)
         if deploy_result:
             deploy_id = deploy_result.get('id')
-            self.logger.info(f"新的部署已触发: 项目名 {project}, 服务名称 {service_name}")
+            self.logger.info(
+                f"新的部署已触发: 项目名 {project}, 服务名称 {service_name}"
+            )
 
             # 启用多进程日志
             log_to_stderr()
 
-            # 使用进程
             process = Process(
                 target=self.check_deploy_and_notify,
                 name=f"Process-{project}",
-                args=(project, service_name, service_id, deploy_id, api_key)
+                args=(project, service_name, service_id, deploy_id, api_key),
             )
             process.start()
-            self.logger.info(f"后台检查部署状态的进程已启动: 项目名: {project}, 服务名称 {service_name}")
+            self.logger.info(
+                f"后台检查部署状态的进程已启动: 项目名: {project}, 服务名称 {service_name}"
+            )
+
+            threading.Thread(
+                target=self._release_lock_after_process,
+                args=(process, lock_file),
+                daemon=True,
+            ).start()
 
             return {
                 'message': '部署已触发',
@@ -487,9 +506,9 @@ class RenderService:
                 'service_name': service_name,
                 'service_id': service_id,
                 'status': 'pending'
-            }, None, 200
+            }, None, 200, True
         else:
             return None, {
                 "error": f"触发部署失败: 项目名 {project}, 服务名称 {service_name}",
                 "details": "API 调用失败，请检查服务状态"
-            }, 500
+            }, 500, False
